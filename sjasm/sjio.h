@@ -49,11 +49,14 @@ extern int ListAddress;
 
 extern FILE* FP_Input;
 
+char* FilenameExtPos(char* filename, const char* initWithName = nullptr, size_t initNameMaxLength = 0);
+const char* FilenameBasePos(const char* fullname);
 void OpenDest(int mode = OUTPUT_TRUNCATE);
 void NewDest(char* newfilename, int mode = OUTPUT_TRUNCATE);
 int FileExists(char* filename);
 void Error(const char* message, const char* badValueMessage = NULL, EStatus type = PASS3);
 void ErrorInt(const char* message, aint badValue, EStatus type = PASS3);
+void ErrorOOM();		// out of memory
 void Warning(const char* message, const char* badValueMessage = NULL, EWStatus type = W_PASS3);
 FILE* GetListingFile();
 void ListFile(bool showAsSkipped = false);
@@ -64,11 +67,10 @@ void EmitWord(int word);
 void EmitBytes(const int* bytes);
 void EmitWords(int* words);
 void EmitBlock(aint byte, aint len, bool preserveDeviceMemory = false, int emitMaxToListing = 4);
-void OpenFile(char* nfilename, bool systemPathsBeforeCurrent = false);
-void IncludeFile(char* nfilename, bool systemPathsBeforeCurrent);
+void OpenFile(const char* nfilename, bool systemPathsBeforeCurrent = false);
+void IncludeFile(const char* nfilename, bool systemPathsBeforeCurrent);
 void Close();
 void OpenList();
-void OpenSLD();
 
 void OpenUnrealList();
 void ReadBufLine(bool Parse = true, bool SplitByColon = true);
@@ -78,7 +80,7 @@ void OpenTapFile(char * tapename, int flagbyte);
 void PrintHex(char* & dest, aint value, int nibbles);
 void PrintHex32(char* & dest, aint value);
 void PrintHexAlt(char* & dest, aint value);
-char* GetPath(char* fname, char** filenamebegin = NULL, bool systemPathsBeforeCurrent = false);
+char* GetPath(const char* fname, char** filenamebegin = NULL, bool systemPathsBeforeCurrent = false);
 
 /**
  * @brief Includes bytes of particular file into output (and virtual device memory).
@@ -103,6 +105,12 @@ EReturn SkipFile();
 void SeekDest(long, int);
 int ReadFileToCStringsList(CStringsList*& f, const char* end);
 void WriteExp(char* n, aint v);
+
+/////// source-level-debugging support by Ckirby
+bool IsSldExportActive();
+void OpenSld();
+void CloseSld();
+void WriteToSldFile(int pageNum, int value, char type = 'T', const char* symbol = nullptr);
 
 //eof sjio.h
 

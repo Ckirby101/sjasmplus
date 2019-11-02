@@ -64,26 +64,24 @@ int ParseExpPrim(char*& p, aint& nval) {
 		nval = res;
 		return 1;
 	} else if (isdigit((byte)*p) || (*p == '#' && isalnum((byte)*(p + 1))) || (*p == '$' && isalnum((byte)*(p + 1))) || *p == '%') {
-	  	res = GetConstant(p, nval);
-	} else if (isalpha((byte)*p) || *p == '_' || *p == '.' || *p == '@') {
-	  	res = GetLabelValue(p, nval);
-	} else if (*p == '?' && (isalpha((byte)*(p + 1)) || *(p + 1) == '_' || *(p + 1) == '.' || *(p + 1) == '@')) {
+		return GetConstant(p, nval);
+	} else if (isLabelStart(p)) {
+		return GetLabelValue(p, nval);
+	} else if (*p == '?' && isLabelStart(p+1)) {
 		// this is undocumented "?<symbol>" operator, seems as workaround for labels like "not"
 		// This is deprecated and will be removed in v2.x of sjasmplus
 		// (where keywords will be reserved and such label would be invalid any way)
 		Warning("?<symbol> operator is deprecated and will be removed in v2.x", p);
 		++p;
-		res = GetLabelValue(p, nval);
+		return GetLabelValue(p, nval);
 	} else if (DeviceID && *p == '$' && *(p + 1) == '$') {
-		++p;
-		++p;
+		p += 2;
+		if (isLabelStart(p)) return GetLabelPage(p, nval);
 		nval = Page->Number;
-
 		return 1;
 	} else if (*p == '$') {
 		++p;
 		nval = CurAddress;
-
 		return 1;
 	} else if (!(res = GetCharConst(p, nval))) {
 		if (synerr) Error("Syntax error", p, IF_FIRST);
@@ -401,7 +399,7 @@ static bool ReplaceDefineInternal(char* lp, char* const nl) {
 			continue;
 		}
 
-		if (!isalpha((byte)*lp) && *lp != '_') {
+		if (!isLabelStart(lp, false)) {
 			*rp++ = *lp++;
 			continue;
 		}
@@ -502,7 +500,7 @@ void SetLastParsedLabel(const char* label) {
 	if (LastParsedLabel) free(LastParsedLabel);
 	if (nullptr != label) {
 		LastParsedLabel = STRDUP(label);
-		if (nullptr == LastParsedLabel) Error("No enough memory!", NULL, FATAL);
+		if (nullptr == LastParsedLabel) ErrorOOM();
 		LastParsedLabelLine = CompiledCurrentLine;
 	} else {
 		LastParsedLabel = nullptr;
@@ -514,7 +512,7 @@ void ParseLabel() {
 	if (White()) return;
 	if (Options::syx.IsPseudoOpBOF && ParseDirective(true)) return;
 	char temp[LINEMAX], * tp = temp, * ttp;
-	aint val, oval;
+	aint val;
 	while (*lp && !White() && *lp != ':' && *lp != '=') {
 		*tp = *lp; ++tp; ++lp;
 	}
@@ -524,6 +522,12 @@ void ParseLabel() {
 	SkipBlanks();
 	IsLabelNotFound = 0;
 	if (isdigit((byte)*tp)) {
+		ttp = tp;
+		while (*ttp && isdigit((byte)*ttp)) ++ttp;
+		if (*ttp) {
+			Error("Invalid temporary label (not a number)", temp);
+			return;
+		}
 		if (NeedEQU() || NeedDEFL()) {
 			Error("Number labels are allowed as address labels only, not for DEFL/=/EQU", temp, SUPPRESS);
 			return;
@@ -558,49 +562,29 @@ void ParseLabel() {
 			val = CurAddress;
 		}
 		ttp = tp;
-		if (!(tp = ValidateLabel(tp, VALIDATE_LABEL_SET_NAMESPACE))) {
+		if (!(tp = ValidateLabel(tp, true))) {
 			return;
 		}
 		// Copy label name to last parsed label variable
 		if (!IsDEFL) SetLastParsedLabel(tp);
 		if (pass == LASTPASS) {
 
-
-			
-			if (IsEQU)
-			{
-				CDeviceSlot *slot = Device->GetSlot(((val & 0xE000) >> 13));
-				char* buf = new char[LINEMAX];
-				SPRINTF4(buf, LINEMAX, "%s|%d|%d|%d|D\n", tp, CurrentSourceLine, -1,val);
-				WriteToSLDFile(buf);
+			CLabelTableEntry* label = LabelTable.Find(tp, true);
+			if (nullptr == label) {		// should have been already defined before last pass
+				Error("Label not found", tp);
+				return;
 			}
-			else
-			{
-				if (!IsDEFL)
-				{
-					CDeviceSlot *slot = Device->GetSlot(((val & 0xE000) >> 13));
-
-					char* buf = new char[LINEMAX];
-
-					//SPRINTF3(buf, LINEMAX, "Label %s bank %u address %u F", tp, slot->Page->Number, val);
-					//Warning(">>>>> Function", buf);
-
-					SPRINTF4(buf, LINEMAX, "%s|%d|%d|%d|F\n", tp, CurrentSourceLine, slot->Page->Number, CurAddress);
-					WriteToSLDFile(buf);
-				}
-			}
-
-			
 			if (IsDEFL) {		//re-set DEFL value
 				LabelTable.Insert(tp, val, false, true, false);
+			} else if (IsSldExportActive()) {
+				// SLD (Source Level Debugging) tracing-data logging
+				WriteToSldFile(IsEQU ? -1 : label->page, val, IsEQU ? 'D' : 'F', tp);
 			}
-			if (!GetLabelValue(ttp, oval)) {
-				Error("Internal error. ParseLabel()", NULL, FATAL);
-			}
-			if (!IsDEFL && val != oval) {
+
+			if (val != label->value) {
 				char* buf = new char[LINEMAX];
 
-				SPRINTF2(buf, LINEMAX, "previous value %u not equal %u", oval, val);
+				SPRINTF2(buf, LINEMAX, "previous value %u not equal %u", label->value, val);
 				Warning("Label has different value in pass 3", buf);
 				LabelTable.Update(tp, val);
 
@@ -611,6 +595,29 @@ void ParseLabel() {
 		} else if (pass == 1 && !LabelTable.Insert(tp, val, false, IsDEFL, IsEQU)) {
 			Error("Duplicate label", tp, EARLY);
 		}
+
+// TODO v2.x: currently DEFL+EQU label can be followed with instruction => remove this syntax
+// TODO v2.x: this is too complicated in current version: Unreal/Cspect already expect
+// EQU/DEFL to be current page or "ROM" = not a big deal as they did change in v1.x course already.
+// But also struct labels are set as EQU ones, so this has to split, and many other details.
+// (will also need more than LABEL_PAGE_UNDEFINED value to deal with more states)
+// 		if (IsEQU && comma(lp)) {	// Device extension: "<label> EQU <address>,<page number>"
+// 			if (!DeviceID) {
+// 				Error("EQU can set page to label only in device mode", line);
+// 				SkipToEol(lp);
+// 			} else if (!ParseExpression(lp, oval)) {	// try to read page number into "oval"
+// 				Error("Expression error", lp);
+// 				oval = -1;
+// 			} else if (oval < 0 || Device->PagesCount <= oval) {
+// 				ErrorInt("Invalid page number", oval);
+// 				oval = -1;
+// 			} else {
+// 				if (val < 0 || 0xFFFF < val) Warning("The EQU address is outside of 16bit range", line);
+// 				CLabelTableEntry* equLabel = LabelTable.Find(tp, true);	// must be already defined + found
+// 				equLabel->page = oval;			// set it's page number
+// 			}
+// 		}
+
 		delete[] tp;
 	}
 }
@@ -642,30 +649,33 @@ int ParseMacro() {
 	return 0;
 }
 
+static bool PageDiffersWarningShown = false;
+
 void ParseInstruction() {
 	if ('@' == *lp) ++lp;		// skip single '@', if it was used to inhibit macro expansion
 	if (ParseDirective()) {
 		return;
 	}
 
-	if (pass == LASTPASS)
-	{
-		CDeviceSlot *slot = Device->GetSlot(((CurAddress & 0xE000) >> 13));
-
-
-		
-		char* buf = new char[LINEMAX];
-
-		SPRINTF4(buf, LINEMAX, "%s|%d|%d|%d|T\n", filename , CurrentSourceLine,slot->Page->Number, CurAddress);
-		WriteToSLDFile(buf);
-		
-		//Warning(">>>>> OPCODE", buf);
-
+	// SLD (Source Level Debugging) tracing-data logging
+	if (IsSldExportActive()) {
+		int pageNum = Page->Number;
+		if (PseudoORG) {
+			int mappingPageNum = Device->GetPageOfA16(CurAddress);
+			if (LABEL_PAGE_UNDEFINED == dispPageNum) {	// special DISP page is not set, use mapped
+				pageNum = mappingPageNum;
+			} else {
+				pageNum = dispPageNum;					// special DISP page is set, use it instead
+				if (pageNum != mappingPageNum && !PageDiffersWarningShown) {
+					Warning("DISP memory page differs from current mapping");
+					PageDiffersWarningShown = true;		// show warning about different mapping only once
+				}
+			}
+		}
+		WriteToSldFile(pageNum, CurAddress);
 	}
-	
-	Z80::GetOpCode();
 
-	//_COUT "GET OPCODE" +  CurAddress _ENDL;
+	Z80::GetOpCode();
 }
 
 static const byte win2dos[] = //taken from HorrorWord %)))
@@ -754,15 +764,11 @@ void ParseLineSafe(bool parselabels) {
 	char* rp = lp;
 	if (sline[0] > 0) {
 		tmp = STRDUP(sline);
-		if (tmp == NULL) {
-			Error("No enough memory!", NULL, FATAL);
-		}
+		if (tmp == NULL) ErrorOOM();
 	}
 	if (sline2[0] > 0) {
 		tmp2 = STRDUP(sline2);
-		if (tmp2 == NULL) {
-			Error("No enough memory!", NULL, FATAL);
-		}
+		if (tmp2 == NULL) ErrorOOM();
 	}
 
 	ParseLine(parselabels);
@@ -806,9 +812,7 @@ void ParseStructLabel(CStructure* st) {	//FIXME Ped7g why not to reuse ParseLabe
 		Error("[STRUCT] Number labels not allowed within structs"); return;
 	}
 	PreviousIsLabel = STRDUP(tp);
-	if (PreviousIsLabel == NULL) {
-		Error("No enough memory!", NULL, FATAL);
-	}
+	if (PreviousIsLabel == NULL) ErrorOOM();
 	st->AddLabel(tp);
 }
 
@@ -922,9 +926,7 @@ void LuaParseLine(char *str) {
 	// preserve current actual line which will be parsed next
 	char *oldLine = STRDUP(line);
 	char *oldEolComment = eolComment;
-	if (oldLine == NULL) {
-		Error("No enough memory!", NULL, FATAL);
-	}
+	if (oldLine == NULL) ErrorOOM();
 
 	// inject new line from Lua call and assemble it
 	STRCPY(line, LINEMAX, str);
@@ -941,9 +943,7 @@ void LuaParseCode(char *str) {
 	char *ml;
 
 	ml = STRDUP(line);
-	if (ml == NULL) {
-		Error("No enough memory!", NULL, FATAL);
-	}
+	if (ml == NULL) ErrorOOM();
 
 	STRCPY(line, LINEMAX, str);
 	ParseLineSafe(false);

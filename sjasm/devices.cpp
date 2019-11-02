@@ -94,6 +94,8 @@ static void DeviceZXSpectrum1024(CDevice **dev, CDevice *parent) {		// add new d
 }
 
 static void DeviceZxSpectrumNext(CDevice **dev, CDevice *parent) {
+	if (Options::IsI8080) Error("Can't use ZXN device while in i8080 assembling mode.", line, FATAL);
+	if (Options::IsLR35902) Error("Can't use ZXN device while in Sharp LR35902 assembling mode.", line, FATAL);
 	*dev = new CDevice("ZXSPECTRUMNEXT", parent);
 	const int initialPages[] = {14, 15, 10, 11, 4, 5, 0, 1};	// basically same as ZX128, but 8k
 	initRegularSlotDevice(*dev, 0x2000, 8, 224, initialPages);
@@ -191,6 +193,25 @@ CDevicePage* CDevice::GetPage(int num) {
 	if (Pages[num]) return Pages[num];
 	Error("Wrong page number", lp);
 	return Pages[0];
+}
+
+// returns slot belonging to the Z80-address (16bit)
+int CDevice::GetSlotOfA16(int32_t address) {
+	for (int i=SlotsCount; i--; ) {
+		CDeviceSlot* const S = Slots[i];
+		if (address < S->Address) continue;
+		if (S->Address + S->Size <= address) return -1;		// outside of slot
+		return i;
+	}
+	return -1;
+}
+
+// returns currently mapped page for the Z80-address (16bit)
+int CDevice::GetPageOfA16(int32_t address) {
+	int slotNum = GetSlotOfA16(address);
+	if (-1 == slotNum) return -1;
+	if (nullptr == Slots[slotNum]->Page) return -1;
+	return Slots[slotNum]->Page->Number;
 }
 
 void CDevice::CheckPage(const ECheckPageLevel level) {

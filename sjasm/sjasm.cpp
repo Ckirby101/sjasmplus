@@ -48,7 +48,9 @@ void PrintHelp() {
 	_COUT "\nOption flags as follows:" _ENDL;
 	_COUT "  -h or --help             Help information (you see it)" _ENDL;
 	_COUT "  --zxnext[=cspect]        Enable ZX Spectrum Next Z80 extensions" _ENDL;
-	_COUT "  -i<path> or -I<path> or --inc=<path>" _ENDL;
+	_COUT "  --i8080                  Limit valid instructions to i8080 only (+ no fakes)" _ENDL;
+	_COUT "  --lr35902                Sharp LR35902 CPU instructions mode (+ no fakes)" _ENDL;
+	_COUT "  -i<path> or -I<path> or --inc=<path> ( --inc without \"=\" to empty the list)" _ENDL;
 	_COUT "                           Include path (later defined have higher priority)" _ENDL;
 	_COUT "  --lst[=<filename>]       Save listing to <filename> (<source>.lst is default)" _ENDL;
 	_COUT "  --lstlab                 Enable label table in listing" _ENDL;
@@ -56,7 +58,7 @@ void PrintHelp() {
 	_COUT "  --exp=<filename>         Save exports to <filename> (see EXPORT pseudo-op)" _ENDL;
 	//_COUT "  --autoreloc              Switch to autorelocation mode. See more in docs." _ENDL;
 	_COUT "  --raw=<filename>         Machine code saved also to <filename> (- is STDOUT)" _ENDL;
-	_COUT "  --sld=<filename>         Write Source Level Debugging data to <filename> (- is STDOUT)" _ENDL;
+	_COUT "  --sld[=<filename>]       Save Source Level Debugging data to <filename>" _ENDL;
 	_COUT " Note: use OUTPUT, LUA/ENDLUA and other pseudo-ops to control output" _ENDL;
 	_COUT " Logging:" _ENDL;
 	_COUT "  --nologo                 Do not show startup message" _ENDL;
@@ -81,7 +83,8 @@ namespace Options {
 	char RAWFName[LINEMAX] = {0};
 	char UnrealLabelListFName[LINEMAX] = {0};
 	char CSpectMapFName[LINEMAX] = {0};
-	char SourceLevelDebugFName[LINEMAX] = { "out.txt" };
+	char SourceLevelDebugFName[LINEMAX] = {0};
+	bool IsDefaultSldName = false;
 
 	char ZX_SnapshotFName[LINEMAX] = {0};
 	char ZX_TapeFName[LINEMAX] = {0};
@@ -97,23 +100,29 @@ namespace Options {
 	bool NoDestinationFile = true;		// no *.out file by default
 	SSyntax syx, systemSyntax;
 	bool SourceStdIn = false;
+	bool IsI8080 = false;
+	bool IsLR35902 = false;
 
-/*
 	// Include directories list is initialized with "." directory
-	CStringsList* IncludeDirsList = new CStringsList((char *)".");
-*/
-	// Include directories list is empty initially (since v1.13.4)
-	CStringsList* IncludeDirsList = nullptr;
+	CStringsList* IncludeDirsList = new CStringsList(".");
 
 	CDefineTable CmdDefineTable;		// is initialized by constructor
+
+	static const char* fakes_disabled_txt_error = "Fake instructions are not enabled";
+	static const char* fakes_in_i8080_txt_error = "Fake instructions are not implemented in i8080 mode";
+	static const char* fakes_in_lr35902_txt_error = "Fake instructions are not implemented in Sharp LR35902 mode";
 
 	// returns true if fakes are completely disabled, false when they are enabled
 	// showMessage=true: will also display error/warning (use when fake ins. is emitted)
 	// showMessage=false: can be used to silently check if fake instructions are even possible
 	bool noFakes(bool showMessage) {
-		if (!showMessage) return !syx.FakeEnabled;
-		if (!syx.FakeEnabled) {
-			Error("Fake instructions are not enabled", bp, SUPPRESS);
+		bool fakesDisabled = Options::IsI8080 || Options::IsLR35902 || (!syx.FakeEnabled);
+		if (!showMessage) return fakesDisabled;
+		if (fakesDisabled) {
+			const char* errorTxt = fakes_disabled_txt_error;
+			if (Options::IsI8080) errorTxt = fakes_in_i8080_txt_error;
+			if (Options::IsLR35902) errorTxt = fakes_in_lr35902_txt_error;
+			Error(errorTxt, bp, SUPPRESS);
 			return true;
 		}
 		// check end-of-line comment for mentioning "fake" to remove warning, or beginning with "ok"
@@ -153,22 +162,26 @@ CDevicePage *Page = 0;
 char* DeviceID = 0;
 
 // extend
-char filename[LINEMAX], * lp, line[LINEMAX], temp[LINEMAX], ErrorLine[LINEMAX2], * bp;
+const char* fileNameFull = nullptr, * fileName = nullptr;	//fileName is either full or basename (--fullpath)
+char* lp, line[LINEMAX], temp[LINEMAX], ErrorLine[LINEMAX2], * bp;
 char sline[LINEMAX2], sline2[LINEMAX2], * substitutedLine, * eolComment, ModuleName[LINEMAX];
 
 char SourceFNames[128][MAX_PATH];
-int SourceFNamesCount = 0;
+static int SourceFNamesCount = 0;
+std::vector<std::string> openedFileNames(256);
 std::vector<char> stdin_log;
 
 int ConvertEncoding = ENCWIN;
 
 int pass = 0, IsLabelNotFound = 0, ErrorCount = 0, WarningCount = 0, IncludeLevel = -1;
 int IsRunning = 0, donotlist = 0, listmacro = 0;
-int adrdisp = 0, PseudoORG = 0, StartAddress = -1;
+int adrdisp = 0, PseudoORG = 0, dispPageNum = LABEL_PAGE_UNDEFINED, StartAddress = -1;
 byte* MemoryPointer=NULL;
 int macronummer = 0, lijst = 0, reglenwidth = 0;
-aint CurAddress = 0, CurrentSourceLine = 0, CompiledCurrentLine = 0, LastParsedLabelLine = 0;
-aint destlen = 0, size = -1L,PreviousErrorLine = -1L, maxlin = 0, comlin = 0;
+TextFilePos CurSourcePos, DefinitionPos;
+uint32_t maxlin = 0;
+aint CurAddress = 0, CompiledCurrentLine = 0, LastParsedLabelLine = 0;
+aint destlen = 0, size = -1L,PreviousErrorLine = -1L, comlin = 0;
 char* CurrentDirectory=NULL;
 
 char* vorlabp=NULL, * macrolabp=NULL, * LastParsedLabel=NULL;
@@ -193,13 +206,13 @@ static char* globalDeviceID = NULL;
 
 void InitPass() {
 	Options::SSyntax::restoreSystemSyntax();	// release all stored syntax variants and reset to initial
-	aint pow10 = 1;
+	uint32_t maxpow10 = 1;
 	reglenwidth = 0;
 	do {
 		++reglenwidth;
-		pow10 *= 10;
-		if (pow10 < 10) ExitASM(1);	// 32b overflow
-	} while (pow10 <= maxlin);
+		maxpow10 *= 10;
+		if (maxpow10 < 10) ExitASM(1);	// 32b overflow
+	} while (maxpow10 <= maxlin);
 	*ModuleName = 0;
 	SetLastParsedLabel(nullptr);
 	if (vorlabp) free(vorlabp);
@@ -207,8 +220,9 @@ void InitPass() {
 	macrolabp = NULL;
 	listmacro = 0;
 	CurAddress = 0;
-	CurrentSourceLine = CompiledCurrentLine = 0;
-	PseudoORG = 0; adrdisp = 0;
+	CurSourcePos = DefinitionPos = TextFilePos();	// reset current source/definition positions
+	CompiledCurrentLine = 0;
+	PseudoORG = 0; adrdisp = 0; dispPageNum = LABEL_PAGE_UNDEFINED;
 	ListAddress = 0; macronummer = 0; lijst = 0; comlin = 0;
 	lijstp = NULL;
 	StructureTable.ReInit();
@@ -360,6 +374,8 @@ namespace Options {
 				// check for particular options and setup option value by it
 				// first check all syntax-only options which may be modified by OPT directive
 				if (!strcmp(opt, "zxnext")) {
+					if (IsI8080) Error("Can't enable Next extensions while in i8080 mode", nullptr, FATAL);
+					if (IsLR35902) Error("Can't enable Next extensions while in Sharp LR35902 mode", nullptr, FATAL);
 					syx.IsNextEnabled = 1;
 					if (!strcmp(val, "cspect")) syx.IsNextEnabled = 2;	// CSpect emulator extensions
 				} else if (!strcmp(opt, "reversepop")) {
@@ -373,6 +389,16 @@ namespace Options {
 				} else if (onlySyntaxOptions) {
 					// rest of the options is available only when launching the sjasmplus
 					return;
+				} else if (!strcmp(opt, "lr35902")) {
+					IsLR35902 = true;
+					// force (silently) other CPU modes OFF
+					IsI8080 = false;
+					syx.IsNextEnabled = 0;
+				} else if (!strcmp(opt, "i8080")) {
+					IsI8080 = true;
+					// force (silently) other CPU modes OFF
+					IsLR35902 = false;
+					syx.IsNextEnabled = 0;
 				} else if ((!doubleDash && !strcmp(opt,"h") && !val[0]) || (doubleDash && !strcmp(opt, "help"))) {
 					ShowHelp = 1;
 				} else if (doubleDash && !strcmp(opt, "version")) {
@@ -402,6 +428,8 @@ namespace Options {
 					}
 				} else if (!strcmp(opt, "lst") && !val[0]) {
 					IsDefaultListingName = true;
+				} else if (!strcmp(opt, "sld") && !val[0]) {
+					IsDefaultSldName = true;
 				} else if (
 					CheckAssignmentOption("sym", SymbolListFName, LINEMAX) ||
 					CheckAssignmentOption("lst", ListingFName, LINEMAX) ||
@@ -421,7 +449,12 @@ namespace Options {
 					if (*val) {
 						IncludeDirsList = new CStringsList(val, IncludeDirsList);
 					} else {
-						_CERR "No include path found in " _CMDL arg _ENDL;
+						if (!doubleDash || '=' == arg[5]) {
+							_CERR "No include path found in " _CMDL arg _ENDL;
+						} else {	// individual `--inc` without "=path" will RESET include dirs
+							if (IncludeDirsList) delete IncludeDirsList;
+							IncludeDirsList = nullptr;
+						}
 					}
 				} else if (!doubleDash && opt[0] == 'D') {
 					char defN[LINEMAX], defV[LINEMAX];
@@ -544,6 +577,9 @@ int main(int argc, char **argv) {
 		if (OV_LST == Options::OutputVerbosity && (Options::IsDefaultListingName || Options::ListingFName[0])) {
 			Error("Using  --msg=lst[lab]  and other list options is not possible.", NULL, FATAL);
 		}
+		if (Options::IsDefaultSldName && Options::SourceLevelDebugFName[0]) {
+			Error("Using both  --sld  and  --sld=<filename>  is not possible.", NULL, FATAL);
+		}
 	}
 	Options::systemSyntax = Options::syx;		// create copy of initial system settings of syntax
 
@@ -618,14 +654,15 @@ int main(int argc, char **argv) {
 	// open lists (if not set to "default" file name, then the OpenFile will handle it)
 	OpenList();
 
-	//open source level debugging file
-	OpenSLD();
-	
 	do {
 		++pass;
 		InitPass();
 
-		if (pass == LASTPASS) OpenDest();
+		if (pass == LASTPASS) {
+			OpenDest();
+			//open source level debugging file
+			OpenSld();
+		}
 
 		for (i = 0; i < SourceFNamesCount; i++) {
 			IsRunning = 1;

@@ -28,14 +28,25 @@
 
 // tables.h
 
+struct TextFilePos {
+	const char*		filename;
+	uint32_t		line;				// line numbering start at 1 (human way) 0 = invalid/init value
+	uint32_t 		colBegin, colEnd;	// columns coordinates are unused at this moment
+
+	TextFilePos();
+	void newFile(const char* fileNamePtr);	// requires stable immutable pointer (until sjasmplus exits)
+
+	// advanceColumns are valid only when true == endsWithColon (else advanceColumns == 0)
+	// default arguments are basically "next line"
+	void nextSegment(bool endsWithColon = false, size_t advanceColumns = 0);
+};
+
 enum EStructureMembers { SMEMBUNKNOWN, SMEMBALIGN, SMEMBBYTE, SMEMBWORD, SMEMBBLOCK, SMEMBDWORD, SMEMBD24, SMEMBPARENOPEN, SMEMBPARENCLOSE };
 
-// bit flags for ValidateLabel
-constexpr int VALIDATE_LABEL_SET_NAMESPACE = 0x01;
-constexpr int VALIDATE_LABEL_AS_GLOBAL = 0x02;
-char* ValidateLabel(char* naam, int flags);
+char* ValidateLabel(const char* naam, bool setNameSpace);
 extern char* PreviousIsLabel;
-int GetLabelValue(char*& p, aint& val);
+bool GetLabelPage(char*& p, aint& val);
+bool GetLabelValue(char*& p, aint& val);
 int GetLocalLabelValue(char*& op, aint& val);
 
 constexpr int LABEL_PAGE_UNDEFINED = -1;
@@ -59,7 +70,6 @@ public:
 	CLabelTable();
 	int Insert(const char* nname, aint nvalue, bool undefined = false, bool IsDEFL = false, bool IsEQU = false);
 	int Update(char*, aint);
-	int GetValue(char* nname, aint& nvalue);
 	CLabelTableEntry* Find(const char* name, bool onlyDefined = false);
 	bool Remove(const char* name);
 	bool IsUsed(const char* name);
@@ -118,7 +128,8 @@ class CStringsList {
 public:
 	char* string;
 	CStringsList* next;
-	int sourceLine;
+	TextFilePos source;
+	TextFilePos definition;
 	CStringsList();
 	~CStringsList();
 	CStringsList(const char* stringSource, CStringsList* next = NULL);
@@ -251,6 +262,7 @@ private:
 
 struct SRepeatStack {
 	int RepeatCount;
+	TextFilePos sourcePos;
 	aint CurrentSourceLine;
 	CStringsList* Lines;
 	CStringsList* Pointer;
